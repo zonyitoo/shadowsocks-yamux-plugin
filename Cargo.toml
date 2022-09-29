@@ -1,0 +1,19 @@
+[package]
+name = "yamux-plugin"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "yamux-plugin-local"
+path = "src/yamux-plugin-local.rs"
+
+[[bin]]
+name = "yamux-plugin-server"
+path = "src/yamux-plugin-server.rs"
+
+[dependencies]
+tokio = { version = "1.21.2", features = ["net", "rt", "rt-multi-thread", "macros", "io-util"] }
+tokio-yamux = "0.3.7"
+env_logger = "0.9.1"
+futures = "0.3.24"
+log = "0.4.17"
