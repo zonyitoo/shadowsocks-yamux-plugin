@@ -2,7 +2,7 @@ use std::{io, mem, os::unix::io::AsRawFd};
 
 use log::error;
 
-pub fn set_fwmark<S: AsRawFd>(socket: &S, fwmark: u32) -> io::Result<()> {
+pub fn set_fwmark<S: AsRawFd>(socket: &S, mark: u32) -> io::Result<()> {
     // Set SO_MARK for mark-based routing on Linux (since 2.6.25)
     // NOTE: This will require CAP_NET_ADMIN capability (root in most cases)
     let ret = unsafe {
@@ -16,17 +16,14 @@ pub fn set_fwmark<S: AsRawFd>(socket: &S, fwmark: u32) -> io::Result<()> {
     };
     if ret != 0 {
         let err = io::Error::last_os_error();
-        error!(
-            "setsockopt SOL_SOCKET SO_MARK failed, fwmark: {}, error: {}",
-            fwmark, err
-        );
+        error!("setsockopt SOL_SOCKET SO_MARK failed, mark: {}, error: {}", mark, err);
         return Err(err);
     }
 
     Ok(())
 }
 
-fn set_bindtodevice<S: AsRawFd>(socket: &S, iface: &str) -> io::Result<()> {
+pub fn set_bindtodevice<S: AsRawFd>(socket: &S, iface: &str) -> io::Result<()> {
     let iface_bytes = iface.as_bytes();
 
     unsafe {
