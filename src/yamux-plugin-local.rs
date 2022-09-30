@@ -3,16 +3,18 @@ use std::{cell::RefCell, collections::LinkedList, env, io, time::Duration};
 use env_logger::Builder;
 use futures::StreamExt;
 use log::{error, info, trace};
-use tokio::{
-    net::{TcpListener, TcpStream},
-    time,
-};
+use tokio::{net::TcpListener, time};
 use tokio_yamux::{Config, Control, Error, Session};
+
+use yamux_plugin::{create_outbound_socket, PluginOpts};
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let mut builder = Builder::from_default_env();
     builder.format_timestamp_millis().init();
+
+    #[cfg(all(unix, not(target_os = "android")))]
+    yamux_plugin::adjust_nofile();
 
     let remote_host = env::var("SS_REMOTE_HOST").expect("require SS_REMOTE_HOST");
     let remote_port = env::var("SS_REMOTE_PORT").expect("require SS_REMOTE_PORT");
@@ -21,6 +23,11 @@ async fn main() -> io::Result<()> {
 
     let remote_port = remote_port.parse::<u16>().expect("SS_REMOTE_PORT must be a valid port");
     let local_port = local_port.parse::<u16>().expect("SS_LOCAL_PORT must be a valid port");
+
+    let mut plugin_opts = PluginOpts::default();
+    if let Ok(opts) = env::var("SS_PLUGIN_OPTIONS") {
+        plugin_opts = PluginOpts::from_str(&opts).expect("unrecognized SS_PLUGIN_OPTIONS");
+    }
 
     let listener = TcpListener::bind((local_host.as_str(), local_port)).await?;
     info!(
@@ -64,8 +71,16 @@ async fn main() -> io::Result<()> {
                 }
             }
 
-            let remote_stream = match TcpStream::connect((remote_host.as_str(), remote_port)).await {
-                Ok(s) => s,
+            let remote_stream = match create_outbound_socket((remote_host.as_str(), remote_port), &plugin_opts).await {
+                Ok(s) => {
+                    trace!(
+                        "connected tcp host {}:{}, opts: {:?}",
+                        remote_host,
+                        remote_port,
+                        plugin_opts
+                    );
+                    s
+                }
                 Err(err) => {
                     error!(
                         "failed to connect to remote {}:{}, error: {}",
