@@ -273,7 +273,7 @@ async fn main() -> io::Result<()> {
 
     let mut context = Context::new(ServerType::Local);
     context.set_dns_resolver(dns_resolver);
-    context.set_ipv6_first(plugin_opts.ipv6_first.unwrap_or(false));
+    context.set_ipv6_first(plugin_opts.ipv6_first.unwrap_or(true));
 
     let (_, listener) = lookup_then!(context, &remote_host, remote_port, |addr| {
         TcpListener::bind_with_opts(&addr, accept_opts.clone()).await
