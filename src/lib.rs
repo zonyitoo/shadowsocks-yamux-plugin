@@ -3,7 +3,7 @@
 pub mod opt;
 mod sys;
 
-pub use self::opt::{create_outbound_socket, PluginOpts};
+pub use self::opt::PluginOpts;
 #[cfg(all(unix, not(target_os = "android")))]
 pub use sys::adjust_nofile;
 

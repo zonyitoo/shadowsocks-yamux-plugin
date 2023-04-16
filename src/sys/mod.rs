@@ -1,15 +1,3 @@
-use cfg_if::cfg_if;
-
-cfg_if! {
-    if #[cfg(windows)] {
-        mod windows;
-        pub use self::windows::*;
-    } else if #[cfg(unix)] {
-        mod unix;
-        pub use self::unix::*;
-    }
-}
-
 /// Some systems set an artificially low soft limit on open file count, for compatibility
 /// with code that uses select and its hard-coded maximum file descriptor
 /// (limited by the size of fd_set).

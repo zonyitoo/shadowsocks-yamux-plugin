@@ -1,13 +1,10 @@
 //! shadowsocks yamux plugin options
 
-use std::{
-    io,
-    net::{IpAddr, SocketAddr},
-};
+use std::{net::IpAddr, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use serde_urlencoded::{self, de::Error as DeError, ser::Error as SerError};
-use tokio::net::{self, TcpSocket, TcpStream, ToSocketAddrs};
+use shadowsocks::net::{AcceptOpts, ConnectOpts};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PluginOpts {
@@ -23,6 +20,14 @@ pub struct PluginOpts {
     pub outbound_bind_addr: Option<IpAddr>,
     /// UDP tunnel timeout (in seconds)
     pub udp_timeout: Option<u64>,
+    /// TCP Keep Alive
+    pub tcp_keep_alive: Option<u64>,
+    /// TCP Fast Open
+    pub tcp_fast_open: Option<bool>,
+    /// MPTCP
+    pub mptcp: Option<bool>,
+    /// IPv6 First
+    pub ipv6_first: Option<bool>,
 }
 
 impl PluginOpts {
@@ -33,55 +38,37 @@ impl PluginOpts {
     pub fn to_string(&self) -> Result<String, SerError> {
         serde_urlencoded::to_string(self)
     }
-}
 
-async fn create_outbound_socket_one(addr: SocketAddr, opts: &PluginOpts) -> io::Result<TcpStream> {
-    let socket = match addr {
-        SocketAddr::V4(..) => TcpSocket::new_v4()?,
-        SocketAddr::V6(..) => TcpSocket::new_v6()?,
-    };
+    pub fn as_connect_opts(&self) -> ConnectOpts {
+        let mut connect_opts = ConnectOpts::default();
 
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    if let Some(fwmark) = opts.outbound_fwmark {
-        crate::sys::set_fwmark(&socket, fwmark)?;
-    }
-
-    #[cfg(target_os = "freebsd")]
-    if let Some(user_cookie) = opts.outbound_user_cookie {
-        crate::sys::set_user_cookie(&socket, user_cookie)?;
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "watchos", target_os = "tvos", target_os = "ios"))]
-    if let Some(ref iface) = opts.outbound_bind_interface {
-        crate::sys::set_ip_bound_if(&socket, addr, iface)?;
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    if let Some(ref iface) = opts.outbound_bind_interface {
-        crate::sys::set_bindtodevice(&socket, iface)?;
-    }
-
-    #[cfg(windows)]
-    if let Some(ref iface) = opts.outbound_bind_interface {
-        crate::sys::set_ip_unicast_if(&socket, addr, iface)?;
-    }
-
-    if let Some(addr) = opts.outbound_bind_addr {
-        socket.bind(SocketAddr::new(addr, 0))?;
-    }
-
-    socket.connect(addr).await
-}
-
-/// Create a TcpStream for connecting to outbound address `addr`
-pub async fn create_outbound_socket<A: ToSocketAddrs>(addr: A, opts: &PluginOpts) -> io::Result<TcpStream> {
-    let mut last_err = None;
-    for saddr in net::lookup_host(addr).await? {
-        match create_outbound_socket_one(saddr, opts).await {
-            Ok(s) => return Ok(s),
-            Err(err) => last_err = Some(err),
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        if let Some(outbound_fwmark) = self.outbound_fwmark {
+            connect_opts.fwmark = Some(outbound_fwmark);
         }
+
+        #[cfg(target_os = "freebsd")]
+        if let Some(outbound_user_cookie) = self.outbound_user_cookie {
+            connect_opts.user_cookie = Some(outbound_user_cookie);
+        }
+
+        connect_opts.bind_interface = self.outbound_bind_interface.clone();
+        connect_opts.bind_local_addr = self.outbound_bind_addr;
+
+        connect_opts.tcp.keepalive = self.tcp_keep_alive.map(|sec| Duration::from_secs(sec));
+        connect_opts.tcp.fastopen = self.tcp_fast_open.unwrap_or(false);
+        connect_opts.tcp.mptcp = self.mptcp.unwrap_or(false);
+
+        connect_opts
     }
 
-    Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "dns resolve to none")))
+    pub fn as_accept_opts(&self) -> AcceptOpts {
+        let mut accept_opts = AcceptOpts::default();
+
+        accept_opts.tcp.keepalive = self.tcp_keep_alive.map(|sec| Duration::from_secs(sec));
+        accept_opts.tcp.fastopen = self.tcp_fast_open.unwrap_or(false);
+        accept_opts.tcp.mptcp = self.mptcp.unwrap_or(false);
+
+        accept_opts
+    }
 }

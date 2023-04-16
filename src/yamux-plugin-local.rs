@@ -13,17 +13,25 @@ use futures::StreamExt;
 use log::{error, info, trace};
 use lru_time_cache::{Entry, LruCache};
 use once_cell::sync::OnceCell;
+use shadowsocks::{
+    config::ServerType,
+    context::Context,
+    dns_resolver::DnsResolver,
+    lookup_then,
+    lookup_then_connect,
+    net::{TcpListener, TcpStream, UdpSocket},
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, WriteHalf},
-    net::{TcpListener, UdpSocket},
     sync::Mutex,
     time,
 };
 use tokio_yamux::{Config, Control, Error, Session, StreamHandle};
 
-use yamux_plugin::{create_outbound_socket, PluginOpts};
+use yamux_plugin::PluginOpts;
 
 async fn get_or_create_yamux_stream(
+    context: &Context,
     remote_host: &str,
     remote_port: u16,
     plugin_opts: &PluginOpts,
@@ -61,8 +69,13 @@ async fn get_or_create_yamux_stream(
             }
         }
 
-        let remote_stream = match create_outbound_socket((remote_host, remote_port), &plugin_opts).await {
-            Ok(s) => {
+        let connect_opts = plugin_opts.as_connect_opts();
+        let remote_stream_result = lookup_then_connect!(context, remote_host, remote_port, |addr| {
+            TcpStream::connect_with_opts(&addr, &connect_opts).await
+        });
+
+        let remote_stream = match remote_stream_result {
+            Ok((_, s)) => {
                 trace!(
                     "connected tcp host {}:{}, opts: {:?}",
                     remote_host,
@@ -106,13 +119,18 @@ async fn get_or_create_yamux_stream(
 }
 
 async fn start_tcp(
+    context: &Context,
     local_host: &str,
     local_port: u16,
     remote_host: &str,
     remote_port: u16,
     plugin_opts: &PluginOpts,
 ) -> io::Result<()> {
-    let listener = TcpListener::bind((local_host, local_port)).await?;
+    let accept_opts = plugin_opts.as_accept_opts();
+
+    let (_, listener) = lookup_then!(context, local_host, local_port, |addr| {
+        TcpListener::bind_with_opts(&addr, accept_opts.clone()).await
+    })?;
     info!(
         "yamux-plugin TCP listening on {}:{}, remote {}:{}",
         local_host, local_port, remote_host, remote_port
@@ -130,7 +148,7 @@ async fn start_tcp(
 
         trace!("accepted TCP (shadowsocks) client {}", peer_addr);
 
-        let mut yamux_stream = get_or_create_yamux_stream(remote_host, remote_port, plugin_opts).await?;
+        let mut yamux_stream = get_or_create_yamux_stream(context, remote_host, remote_port, plugin_opts).await?;
 
         tokio::spawn(async move {
             // Write a MAGIC number indicates a TCP tunnel.
@@ -144,13 +162,19 @@ async fn start_tcp(
 }
 
 async fn start_udp(
+    context: &Context,
     local_host: &str,
     local_port: u16,
     remote_host: &str,
     remote_port: u16,
     plugin_opts: &PluginOpts,
 ) -> io::Result<()> {
-    let listener = UdpSocket::bind((local_host, local_port)).await?;
+    let accept_opts = plugin_opts.as_accept_opts();
+
+    let (_, listener) = lookup_then!(context, local_host, local_port, |addr| {
+        UdpSocket::listen_with_opts(&addr, accept_opts.clone()).await
+    })?;
+
     info!(
         "yamux-plugin UDP listening on {}:{}, remote {}:{}",
         local_host, local_port, remote_host, remote_port
@@ -185,7 +209,7 @@ async fn start_udp(
         let yamux_stream = match tunnel_entry {
             Entry::Occupied(occ) => occ.into_mut(),
             Entry::Vacant(vac) => {
-                let mut new_stream = get_or_create_yamux_stream(remote_host, remote_port, plugin_opts).await?;
+                let mut new_stream = get_or_create_yamux_stream(context, remote_host, remote_port, plugin_opts).await?;
 
                 // Write a MAGIC number indicates a UDP tunnel.
                 new_stream.write_all(yamux_plugin::UDP_TUNNEL_MAGIC).await?;
@@ -288,8 +312,29 @@ async fn main() -> io::Result<()> {
         plugin_opts = PluginOpts::from_str(&opts).expect("unrecognized SS_PLUGIN_OPTIONS");
     }
 
-    let tcp_fut = start_tcp(&local_host, local_port, &remote_host, remote_port, &plugin_opts);
-    let udp_fut = start_udp(&local_host, local_port, &remote_host, remote_port, &plugin_opts);
+    let connect_opts = plugin_opts.as_connect_opts();
+    let dns_resolver = Arc::new(DnsResolver::trust_dns_system_resolver(connect_opts).await?);
+
+    let mut context = Context::new(ServerType::Local);
+    context.set_dns_resolver(dns_resolver);
+    context.set_ipv6_first(plugin_opts.ipv6_first.unwrap_or(false));
+
+    let tcp_fut = start_tcp(
+        &context,
+        &local_host,
+        local_port,
+        &remote_host,
+        remote_port,
+        &plugin_opts,
+    );
+    let udp_fut = start_udp(
+        &context,
+        &local_host,
+        local_port,
+        &remote_host,
+        remote_port,
+        &plugin_opts,
+    );
 
     tokio::pin!(tcp_fut);
     tokio::pin!(udp_fut);

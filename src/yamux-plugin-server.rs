@@ -1,7 +1,6 @@
 use std::{
     env,
     io::{self, ErrorKind},
-    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
@@ -9,14 +8,22 @@ use std::{
 use env_logger::Builder;
 use futures::StreamExt;
 use log::{debug, error, info, trace};
+use shadowsocks::{
+    config::ServerType,
+    context::{Context, SharedContext},
+    dns_resolver::DnsResolver,
+    lookup_then,
+    lookup_then_connect,
+    net::{TcpListener, TcpStream, UdpSocket},
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream, UdpSocket},
+    net::TcpStream as TokioTcpStream,
     time::{self, Instant},
 };
 use tokio_yamux::{Config, Session, StreamHandle};
 
-use yamux_plugin::{create_outbound_socket, PluginOpts};
+use yamux_plugin::PluginOpts;
 
 enum ConnectionType {
     Tcp,
@@ -24,14 +31,21 @@ enum ConnectionType {
 }
 
 async fn handle_tcp_connection(
+    context: &Context,
     local_host: &str,
     local_port: u16,
     plugin_opts: &PluginOpts,
     mut yamux_stream: StreamHandle,
     magic_buffer: &[u8],
 ) -> io::Result<()> {
-    let mut local_stream = match create_outbound_socket((local_host, local_port), &plugin_opts).await {
-        Ok(s) => {
+    let connect_opts = plugin_opts.as_connect_opts();
+
+    let local_stream_result = lookup_then_connect!(context, local_host, local_port, |addr| {
+        TcpStream::connect_with_opts(&addr, &connect_opts).await
+    });
+
+    let mut local_stream = match local_stream_result {
+        Ok((_, s)) => {
             trace!(
                 "connected tcp host {}:{}, opts: {:?}",
                 local_host,
@@ -61,52 +75,17 @@ async fn handle_tcp_connection(
 }
 
 async fn handle_udp_connection(
+    context: &Context,
     local_host: &str,
     local_port: u16,
     plugin_opts: &PluginOpts,
     mut yamux_stream: StreamHandle,
 ) -> io::Result<()> {
-    let local_addr = match tokio::net::lookup_host((local_host, local_port)).await {
-        Ok(la) => la,
-        Err(err) => {
-            error!("failed to lookup {}:{}, error: {}", local_host, local_port, err);
-            return Err(err);
-        }
-    };
+    let connect_opts = plugin_opts.as_connect_opts();
 
-    let mut socket = None;
-    for addr in local_addr {
-        let bind_addr = match addr {
-            SocketAddr::V4(..) => SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0),
-            SocketAddr::V6(..) => SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0),
-        };
-
-        match UdpSocket::bind(bind_addr).await {
-            Ok(s) => match s.connect(addr).await {
-                Ok(..) => {
-                    socket = Some(s);
-                    break;
-                }
-                Err(err) => {
-                    error!(
-                        "failed to connect to {} ({}:{}), error: {}",
-                        addr, local_host, local_port, err
-                    );
-                }
-            },
-            Err(err) => {
-                error!("failed to create udp socket, error: {}", err);
-            }
-        }
-    }
-
-    let socket = match socket {
-        None => {
-            error!("failed to connect udp to {}:{}", local_host, local_port);
-            return Err(io::Error::new(ErrorKind::Other, "failed to connect udp remote"));
-        }
-        Some(s) => s,
-    };
+    let (_, socket) = lookup_then!(context, local_host, local_port, |addr| {
+        UdpSocket::connect_with_opts(&addr, &connect_opts).await
+    })?;
 
     let mut udp_recv_buffer = [0u8; 65535];
     let mut yamux_recv_buffer = Vec::new();
@@ -185,6 +164,7 @@ async fn handle_udp_connection(
 }
 
 async fn handle_tcp_stream(
+    context: SharedContext,
     local_host: &str,
     local_port: u16,
     plugin_opts: &PluginOpts,
@@ -221,6 +201,7 @@ async fn handle_tcp_stream(
     match connection_type {
         ConnectionType::Tcp => {
             handle_tcp_connection(
+                &context,
                 local_host,
                 local_port,
                 plugin_opts,
@@ -229,15 +210,16 @@ async fn handle_tcp_stream(
             )
             .await
         }
-        ConnectionType::Udp => handle_udp_connection(local_host, local_port, plugin_opts, yamux_stream).await,
+        ConnectionType::Udp => handle_udp_connection(&context, local_host, local_port, plugin_opts, yamux_stream).await,
     }
 }
 
 async fn handle_tcp_session(
+    context: SharedContext,
     local_host: Arc<String>,
     local_port: u16,
     plugin_opts: Arc<PluginOpts>,
-    mut yamux_session: Session<TcpStream>,
+    mut yamux_session: Session<TokioTcpStream>,
 ) -> io::Result<()> {
     loop {
         let yamux_stream = match yamux_session.next().await {
@@ -253,8 +235,9 @@ async fn handle_tcp_session(
 
         let local_host = local_host.clone();
         let plugin_opts = plugin_opts.clone();
+        let context = context.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_tcp_stream(&local_host, local_port, &plugin_opts, yamux_stream).await {
+            if let Err(err) = handle_tcp_stream(context, &local_host, local_port, &plugin_opts, yamux_stream).await {
                 error!("failed to handle yamux stream, error: {}", err);
             }
         });
@@ -284,7 +267,18 @@ async fn main() -> io::Result<()> {
         plugin_opts = PluginOpts::from_str(&opts).expect("unrecognized SS_PLUGIN_OPTIONS");
     }
 
-    let listener = TcpListener::bind((remote_host.as_str(), remote_port)).await?;
+    let connect_opts = plugin_opts.as_connect_opts();
+    let accept_opts = plugin_opts.as_accept_opts();
+    let dns_resolver = Arc::new(DnsResolver::trust_dns_system_resolver(connect_opts).await?);
+
+    let mut context = Context::new(ServerType::Local);
+    context.set_dns_resolver(dns_resolver);
+    context.set_ipv6_first(plugin_opts.ipv6_first.unwrap_or(false));
+
+    let (_, listener) = lookup_then!(context, &remote_host, remote_port, |addr| {
+        TcpListener::bind_with_opts(&addr, accept_opts.clone()).await
+    })?;
+
     info!(
         "yamux-plugin listening on {}:{}, local {}:{}",
         remote_host, remote_port, local_host, local_port
@@ -292,6 +286,7 @@ async fn main() -> io::Result<()> {
 
     let local_host = Arc::new(local_host);
     let plugin_opts = Arc::new(plugin_opts);
+    let context = Arc::new(context);
     loop {
         let (stream, peer_addr) = match listener.accept().await {
             Ok(s) => s,
@@ -306,7 +301,14 @@ async fn main() -> io::Result<()> {
 
         let local_host = local_host.clone();
         let plugin_opts = plugin_opts.clone();
+        let context = context.clone();
         let yamux_session = Session::new_server(stream, Config::default());
-        tokio::spawn(handle_tcp_session(local_host, local_port, plugin_opts, yamux_session));
+        tokio::spawn(handle_tcp_session(
+            context,
+            local_host,
+            local_port,
+            plugin_opts,
+            yamux_session,
+        ));
     }
 }
