@@ -21,6 +21,8 @@ pub struct PluginOpts {
     pub outbound_bind_interface: Option<String>,
     /// Outbound sockets will `bind` to this address
     pub outbound_bind_addr: Option<IpAddr>,
+    /// UDP tunnel timeout (in seconds)
+    pub udp_timeout: Option<u64>,
 }
 
 impl PluginOpts {
