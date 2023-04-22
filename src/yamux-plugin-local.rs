@@ -2,7 +2,7 @@ use std::{
     cell::RefCell,
     collections::LinkedList,
     env,
-    io::{self, ErrorKind},
+    io::{self, Cursor, ErrorKind},
     net::SocketAddr,
     sync::Arc,
     time::Duration,
@@ -152,10 +152,27 @@ async fn start_tcp(
 
         tokio::spawn(async move {
             // Write a MAGIC number indicates a TCP tunnel.
-            if let Err(err) = yamux_stream.write_all(yamux_plugin::TCP_TUNNEL_MAGIC).await {
+
+            let mut first_buffer = [0u8; 1600];
+
+            let magic_len = yamux_plugin::TCP_TUNNEL_MAGIC.len();
+            (&mut first_buffer[..magic_len]).copy_from_slice(yamux_plugin::TCP_TUNNEL_MAGIC);
+
+            // Read some bytes then send together
+            let n = match stream.read(&mut first_buffer[magic_len..]).await {
+                Ok(0) => return,
+                Ok(n) => n,
+                Err(err) => {
+                    error!("read first buffer failed with error: {}", err);
+                    return;
+                }
+            };
+
+            if let Err(err) = yamux_stream.write_all(&first_buffer[..n + magic_len]).await {
                 error!("write TCP magic failed with error: {}", err);
                 return;
             }
+
             let _ = tokio::io::copy_bidirectional(&mut stream, &mut yamux_stream).await;
         });
     }
@@ -195,7 +212,12 @@ async fn start_udp(
 
         trace!("received UDP packet {} bytes from {}", n, peer_addr);
 
-        static UDP_TUNNEL_MAP: OnceCell<Mutex<LruCache<SocketAddr, WriteHalf<StreamHandle>>>> = OnceCell::new();
+        struct UnderlyingStream {
+            handle: WriteHalf<StreamHandle>,
+            written_first: bool,
+        }
+
+        static UDP_TUNNEL_MAP: OnceCell<Mutex<LruCache<SocketAddr, UnderlyingStream>>> = OnceCell::new();
 
         let mut tunnel_map = UDP_TUNNEL_MAP
             .get_or_init(|| {
@@ -209,10 +231,7 @@ async fn start_udp(
         let yamux_stream = match tunnel_entry {
             Entry::Occupied(occ) => occ.into_mut(),
             Entry::Vacant(vac) => {
-                let mut new_stream = get_or_create_yamux_stream(context, remote_host, remote_port, plugin_opts).await?;
-
-                // Write a MAGIC number indicates a UDP tunnel.
-                new_stream.write_all(yamux_plugin::UDP_TUNNEL_MAGIC).await?;
+                let new_stream = get_or_create_yamux_stream(context, remote_host, remote_port, plugin_opts).await?;
 
                 let (mut rx, tx) = tokio::io::split(new_stream);
 
@@ -272,14 +291,35 @@ async fn start_udp(
                     }
                 });
 
-                vac.insert(tx)
+                vac.insert(UnderlyingStream {
+                    handle: tx,
+                    written_first: false,
+                })
             }
         };
 
         // [LENGTH 8-bytes][PACKET .. LENGTH bytes]
-        let result: io::Result<()> = async move {
-            yamux_stream.write_u64(n as u64).await?;
-            yamux_stream.write_all(&buffer[..n]).await?;
+        let result: io::Result<()> = async {
+            let magic_len = yamux_plugin::UDP_TUNNEL_MAGIC.len();
+            let buffer_len = if !yamux_stream.written_first {
+                magic_len + 8 + n
+            } else {
+                8 + n
+            };
+
+            let mut packet_buffer = vec![0u8; buffer_len];
+            let mut bn = 0;
+            if !yamux_stream.written_first {
+                (&mut packet_buffer[..magic_len]).copy_from_slice(yamux_plugin::UDP_TUNNEL_MAGIC);
+                bn += magic_len;
+            }
+            let mut packet_buffer_cursor = Cursor::new(&mut packet_buffer[bn..]);
+            packet_buffer_cursor.write_u64(n as u64).await?;
+            packet_buffer_cursor.write_all(&buffer[..n]).await?;
+
+            yamux_stream.handle.write_all(&packet_buffer).await?;
+            yamux_stream.written_first = true;
+
             Ok(())
         }
         .await;
