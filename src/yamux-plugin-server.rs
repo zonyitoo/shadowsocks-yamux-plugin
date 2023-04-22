@@ -219,7 +219,7 @@ async fn main() -> io::Result<()> {
     let accept_opts = plugin_opts.as_accept_opts();
     let dns_resolver = Arc::new(DnsResolver::trust_dns_system_resolver(connect_opts).await?);
 
-    let mut context = Context::new(ServerType::Local);
+    let mut context = Context::new(ServerType::Server);
     context.set_dns_resolver(dns_resolver);
     context.set_ipv6_first(plugin_opts.ipv6_first.unwrap_or(true));
 
