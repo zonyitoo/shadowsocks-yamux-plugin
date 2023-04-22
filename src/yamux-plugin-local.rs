@@ -30,15 +30,28 @@ use tokio_yamux::{Config, Control, Error, Session, StreamHandle};
 
 use yamux_plugin::PluginOpts;
 
-async fn get_or_create_yamux_stream(
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum ConnectionType {
+    Tcp,
+    Udp,
+}
+
+async fn get_yamux_stream(
+    connection_type: ConnectionType,
     context: &Context,
     remote_host: &str,
     remote_port: u16,
     plugin_opts: &PluginOpts,
 ) -> io::Result<StreamHandle> {
     thread_local! {
-        static YAMUX_SESSION_LIST: RefCell<LinkedList<Control>> = RefCell::new(LinkedList::new());
+        static TCP_YAMUX_SESSION_LIST: RefCell<LinkedList<Control>> = RefCell::new(LinkedList::new());
+        static UDP_YAMUX_SESSION_LIST: RefCell<LinkedList<Control>> = RefCell::new(LinkedList::new());
     }
+
+    let session_list = match connection_type {
+        ConnectionType::Tcp => &TCP_YAMUX_SESSION_LIST,
+        ConnectionType::Udp => &UDP_YAMUX_SESSION_LIST,
+    };
 
     const YAMUX_CONNECT_RETRY_COUNT: usize = 3;
 
@@ -50,18 +63,18 @@ async fn get_or_create_yamux_stream(
             return Err(io::Error::new(ErrorKind::Other, "failed to connect remote"));
         }
 
-        let control_opt = YAMUX_SESSION_LIST.with(|list| list.borrow_mut().pop_front());
+        let control_opt = session_list.with(|list| list.borrow_mut().pop_front());
 
         if let Some(mut control) = control_opt {
             match control.open_stream().await {
                 Ok(s) => {
                     trace!("yamux opened stream {:?}", s);
-                    YAMUX_SESSION_LIST.with(|list| list.borrow_mut().push_back(control));
+                    session_list.with(|list| list.borrow_mut().push_back(control));
                     break s;
                 }
                 Err(Error::StreamsExhausted) => {
                     trace!("yamux connection stream id exhaused");
-                    YAMUX_SESSION_LIST.with(|list| list.borrow_mut().push_back(control));
+                    session_list.with(|list| list.borrow_mut().push_back(control));
                 }
                 Err(err) => {
                     error!("yamux connection open stream failed, error: {}", err);
@@ -112,10 +125,30 @@ async fn get_or_create_yamux_stream(
             }
         });
 
-        YAMUX_SESSION_LIST.with(|list| list.borrow_mut().push_front(yamux_control));
+        session_list.with(|list| list.borrow_mut().push_front(yamux_control));
     };
 
     Ok(yamux_stream)
+}
+
+#[inline]
+async fn get_tcp_yamux_stream(
+    context: &Context,
+    remote_host: &str,
+    remote_port: u16,
+    plugin_opts: &PluginOpts,
+) -> io::Result<StreamHandle> {
+    get_yamux_stream(ConnectionType::Tcp, context, remote_host, remote_port, plugin_opts).await
+}
+
+#[inline]
+async fn get_udp_yamux_stream(
+    context: &Context,
+    remote_host: &str,
+    remote_port: u16,
+    plugin_opts: &PluginOpts,
+) -> io::Result<StreamHandle> {
+    get_yamux_stream(ConnectionType::Udp, context, remote_host, remote_port, plugin_opts).await
 }
 
 async fn start_tcp(
@@ -148,7 +181,7 @@ async fn start_tcp(
 
         trace!("accepted TCP (shadowsocks) client {}", peer_addr);
 
-        let mut yamux_stream = get_or_create_yamux_stream(context, remote_host, remote_port, plugin_opts).await?;
+        let mut yamux_stream = get_tcp_yamux_stream(context, remote_host, remote_port, plugin_opts).await?;
 
         tokio::spawn(async move {
             // Write a MAGIC number indicates a TCP tunnel.
@@ -231,7 +264,7 @@ async fn start_udp(
         let yamux_stream = match tunnel_entry {
             Entry::Occupied(occ) => occ.into_mut(),
             Entry::Vacant(vac) => {
-                let new_stream = get_or_create_yamux_stream(context, remote_host, remote_port, plugin_opts).await?;
+                let new_stream = get_udp_yamux_stream(context, remote_host, remote_port, plugin_opts).await?;
 
                 let (mut rx, tx) = tokio::io::split(new_stream);
 
@@ -367,13 +400,25 @@ async fn main() -> io::Result<()> {
         remote_port,
         &plugin_opts,
     );
+
+    let udp_remote_port = if remote_port == u16::MAX {
+        remote_port - 1
+    } else {
+        remote_port + 1
+    };
+
     let udp_fut = start_udp(
         &context,
         &local_host,
         local_port,
         &remote_host,
-        remote_port,
+        udp_remote_port,
         &plugin_opts,
+    );
+
+    info!(
+        "yamux-plugin listening on {}:{}, remote {}:{} (udp: {})",
+        local_host, local_port, remote_host, remote_port, udp_remote_port
     );
 
     tokio::pin!(tcp_fut);

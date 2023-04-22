@@ -25,6 +25,7 @@ use tokio_yamux::{Config, Session, StreamHandle};
 
 use yamux_plugin::PluginOpts;
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum ConnectionType {
     Tcp,
     Udp,
@@ -36,7 +37,6 @@ async fn handle_tcp_connection(
     local_port: u16,
     plugin_opts: &PluginOpts,
     mut yamux_stream: StreamHandle,
-    magic_buffer: &[u8],
 ) -> io::Result<()> {
     let connect_opts = plugin_opts.as_connect_opts();
 
@@ -62,13 +62,6 @@ async fn handle_tcp_connection(
             return Err(err);
         }
     };
-
-    if !magic_buffer.is_empty() {
-        if let Err(err) = local_stream.write_all(magic_buffer).await {
-            error!("failed to write first data chunk, error: {}", err);
-            return Err(err);
-        }
-    }
 
     let _ = tokio::io::copy_bidirectional(&mut yamux_stream, &mut local_stream).await;
     Ok(())
@@ -163,63 +156,13 @@ async fn handle_udp_connection(
     Ok(())
 }
 
-async fn handle_tcp_stream(
-    context: SharedContext,
-    local_host: &str,
-    local_port: u16,
-    plugin_opts: &PluginOpts,
-    mut yamux_stream: StreamHandle,
-) -> io::Result<()> {
-    let mut connection_type = ConnectionType::Tcp;
-
-    let mut magic_buffer = [0u8; 4];
-    let magic_length = match yamux_stream.read(&mut magic_buffer[..]).await {
-        Ok(0) => {
-            // EOF.
-            return Ok(());
-        }
-        Ok(4) => {
-            trace!("yamux stream magic: {:?}", magic_buffer);
-
-            if magic_buffer == yamux_plugin::TCP_TUNNEL_MAGIC {
-                connection_type = ConnectionType::Tcp;
-                0
-            } else if magic_buffer == yamux_plugin::UDP_TUNNEL_MAGIC {
-                connection_type = ConnectionType::Udp;
-                0
-            } else {
-                4
-            }
-        }
-        Ok(n) => n,
-        Err(err) => {
-            error!("receive magic failed with error: {}", err);
-            return Err(err);
-        }
-    };
-
-    match connection_type {
-        ConnectionType::Tcp => {
-            handle_tcp_connection(
-                &context,
-                local_host,
-                local_port,
-                plugin_opts,
-                yamux_stream,
-                &magic_buffer[..magic_length],
-            )
-            .await
-        }
-        ConnectionType::Udp => handle_udp_connection(&context, local_host, local_port, plugin_opts, yamux_stream).await,
-    }
-}
-
 async fn handle_tcp_session(
     context: SharedContext,
     local_host: Arc<String>,
     local_port: u16,
     plugin_opts: Arc<PluginOpts>,
     mut yamux_session: Session<TokioTcpStream>,
+    connection_type: ConnectionType,
 ) -> io::Result<()> {
     loop {
         let yamux_stream = match yamux_session.next().await {
@@ -237,8 +180,13 @@ async fn handle_tcp_session(
         let plugin_opts = plugin_opts.clone();
         let context = context.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_tcp_stream(context, &local_host, local_port, &plugin_opts, yamux_stream).await {
-                error!("failed to handle yamux stream, error: {}", err);
+            match connection_type {
+                ConnectionType::Tcp => {
+                    handle_tcp_connection(&context, &local_host, local_port, &plugin_opts, yamux_stream).await
+                }
+                ConnectionType::Udp => {
+                    handle_udp_connection(&context, &local_host, local_port, &plugin_opts, yamux_stream).await
+                }
             }
         });
     }
@@ -275,40 +223,98 @@ async fn main() -> io::Result<()> {
     context.set_dns_resolver(dns_resolver);
     context.set_ipv6_first(plugin_opts.ipv6_first.unwrap_or(true));
 
-    let (_, listener) = lookup_then!(context, &remote_host, remote_port, |addr| {
+    let (_, tcp_listener) = lookup_then!(context, &remote_host, remote_port, |addr| {
+        TcpListener::bind_with_opts(&addr, accept_opts.clone()).await
+    })?;
+
+    let udp_remote_port = if remote_port == u16::MAX {
+        remote_port - 1
+    } else {
+        remote_port + 1
+    };
+
+    let (_, udp_listener) = lookup_then!(context, &remote_host, udp_remote_port, |addr| {
         TcpListener::bind_with_opts(&addr, accept_opts.clone()).await
     })?;
 
     info!(
-        "yamux-plugin listening on {}:{}, local {}:{}",
-        remote_host, remote_port, local_host, local_port
+        "yamux-plugin listening on {}:{} (udp: {}), local {}:{}",
+        remote_host, remote_port, udp_remote_port, local_host, local_port
     );
 
     let local_host = Arc::new(local_host);
     let plugin_opts = Arc::new(plugin_opts);
     let context = Arc::new(context);
-    loop {
-        let (stream, peer_addr) = match listener.accept().await {
-            Ok(s) => s,
-            Err(err) => {
-                error!("TcpListener::accept failed, error: {}", err);
-                time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-        };
 
-        trace!("accepted TCP (shadowsocks) client {}", peer_addr);
-
+    let tcp_fut = {
         let local_host = local_host.clone();
         let plugin_opts = plugin_opts.clone();
         let context = context.clone();
-        let yamux_session = Session::new_server(stream, Config::default());
-        tokio::spawn(handle_tcp_session(
-            context,
-            local_host,
-            local_port,
-            plugin_opts,
-            yamux_session,
-        ));
+
+        async move {
+            loop {
+                let (stream, peer_addr) = match tcp_listener.accept().await {
+                    Ok(s) => s,
+                    Err(err) => {
+                        error!("TcpListener::accept failed, error: {}", err);
+                        time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                };
+
+                trace!("accepted TCP (shadowsocks) client {}", peer_addr);
+
+                let local_host = local_host.clone();
+                let plugin_opts = plugin_opts.clone();
+                let context = context.clone();
+                let yamux_session = Session::new_server(stream, Config::default());
+                tokio::spawn(handle_tcp_session(
+                    context,
+                    local_host,
+                    local_port,
+                    plugin_opts,
+                    yamux_session,
+                    ConnectionType::Tcp,
+                ));
+            }
+        }
+    };
+
+    let udp_fut = async move {
+        loop {
+            let (stream, peer_addr) = match udp_listener.accept().await {
+                Ok(s) => s,
+                Err(err) => {
+                    error!("TcpListener::accept failed, error: {}", err);
+                    time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+
+            trace!("accepted UDP (shadowsocks) client {}", peer_addr);
+
+            let local_host = local_host.clone();
+            let plugin_opts = plugin_opts.clone();
+            let context = context.clone();
+            let yamux_session = Session::new_server(stream, Config::default());
+            tokio::spawn(handle_tcp_session(
+                context,
+                local_host,
+                local_port,
+                plugin_opts,
+                yamux_session,
+                ConnectionType::Udp,
+            ));
+        }
+    };
+
+    tokio::pin!(tcp_fut);
+    tokio::pin!(udp_fut);
+
+    loop {
+        tokio::select! {
+            _ = &mut tcp_fut => {},
+            _ = &mut udp_fut => {},
+        }
     }
 }
