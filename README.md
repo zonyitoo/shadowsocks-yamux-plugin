@@ -41,3 +41,7 @@ cargo build --release
 * `tcp_fast_open`: TCP Fast Open
 * `mptcp`: Multipath-TCP
 * `ipv6_first`: Connect IPv6 first (default true)
+
+## SAFETY WARNING
+
+This plugin will add a fixed magic number as a header of all YAMUX connections, which could be detected easily.
