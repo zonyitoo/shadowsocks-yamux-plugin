@@ -1,6 +1,6 @@
 use std::{
     env,
-    io::{self, ErrorKind},
+    io::{self, Cursor, ErrorKind},
     sync::Arc,
     time::Duration,
 };
@@ -106,8 +106,13 @@ async fn handle_udp_connection(
                 timer.reset(Instant::now() + timeout);
 
                 // [LENGTH 8-bytes][PACKET .. LENGTH bytes]
-                yamux_stream.write_u64(n as u64).await?;
-                yamux_stream.write_all(&udp_recv_buffer[..n]).await?;
+                let mut buffer = vec![0u8; 8 + n];
+                let mut buffer_cursor = Cursor::new(&mut buffer);
+
+                buffer_cursor.write_u64(n as u64).await?;
+                buffer_cursor.write_all(&udp_recv_buffer[..n]).await?;
+
+                yamux_stream.write_all(&mut buffer).await?;
             }
 
             yamux_result = yamux_stream.read_u64() => {
