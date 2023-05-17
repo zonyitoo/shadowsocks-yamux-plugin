@@ -15,6 +15,7 @@ use shadowsocks::{
     lookup_then,
     lookup_then_connect,
     net::{TcpListener, TcpStream, UdpSocket},
+    relay::tcprelay::utils::copy_bidirectional,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -63,7 +64,7 @@ async fn handle_tcp_connection(
         }
     };
 
-    let _ = tokio::io::copy_bidirectional(&mut yamux_stream, &mut local_stream).await;
+    let _ = copy_bidirectional(&mut yamux_stream, &mut local_stream).await;
     Ok(())
 }
 
