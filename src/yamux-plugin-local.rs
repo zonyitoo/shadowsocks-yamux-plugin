@@ -57,6 +57,12 @@ async fn get_yamux_stream(
     const YAMUX_CONNECT_RETRY_COUNT: usize = 3;
 
     let mut connect_tried_count = 0;
+
+    let custom_config = Config {
+        max_stream_window_size: (100 * 1024 * 1024),
+        ..Config::default()
+    };
+
     let yamux_stream = loop {
         connect_tried_count += 1;
 
@@ -107,7 +113,7 @@ async fn get_yamux_stream(
             }
         };
 
-        let mut yamux_session = Session::new_client(remote_stream, Config::default());
+        let mut yamux_session = Session::new_client(remote_stream, custom_config);
         let yamux_control = yamux_session.control();
 
         tokio::spawn(async move {

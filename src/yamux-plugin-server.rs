@@ -252,6 +252,11 @@ async fn main() -> io::Result<()> {
     let plugin_opts = Arc::new(plugin_opts);
     let context = Arc::new(context);
 
+    let custom_config = Config {
+        max_stream_window_size: (100 * 1024 * 1024),
+        ..Config::default()
+    };
+
     let tcp_fut = {
         let local_host = local_host.clone();
         let plugin_opts = plugin_opts.clone();
@@ -273,7 +278,7 @@ async fn main() -> io::Result<()> {
                 let local_host = local_host.clone();
                 let plugin_opts = plugin_opts.clone();
                 let context = context.clone();
-                let yamux_session = Session::new_server(stream, Config::default());
+                let yamux_session = Session::new_server(stream, custom_config);
                 tokio::spawn(handle_tcp_session(
                     context,
                     local_host,
@@ -302,7 +307,7 @@ async fn main() -> io::Result<()> {
             let local_host = local_host.clone();
             let plugin_opts = plugin_opts.clone();
             let context = context.clone();
-            let yamux_session = Session::new_server(stream, Config::default());
+            let yamux_session = Session::new_server(stream, custom_config);
             tokio::spawn(handle_tcp_session(
                 context,
                 local_host,
