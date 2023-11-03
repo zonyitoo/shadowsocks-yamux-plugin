@@ -223,7 +223,7 @@ async fn main() -> io::Result<()> {
 
     let connect_opts = plugin_opts.as_connect_opts();
     let accept_opts = plugin_opts.as_accept_opts();
-    let dns_resolver = Arc::new(DnsResolver::trust_dns_system_resolver(None, connect_opts).await?);
+    let dns_resolver = Arc::new(DnsResolver::hickory_dns_system_resolver(None, connect_opts).await?);
 
     let mut context = Context::new(ServerType::Server);
     context.set_dns_resolver(dns_resolver);
