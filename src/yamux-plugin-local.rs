@@ -12,6 +12,8 @@ use env_logger::Builder;
 use futures::StreamExt;
 use log::{error, info, trace, warn};
 use lru_time_cache::LruCache;
+#[cfg(feature = "mimalloc")]
+use mimalloc::MiMalloc;
 use once_cell::sync::OnceCell;
 use shadowsocks::{
     config::ServerType,
@@ -30,6 +32,10 @@ use tokio::{
 use tokio_yamux::{Config, Control, Error, Session, StreamHandle};
 
 use yamux_plugin::PluginOpts;
+
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum ConnectionType {

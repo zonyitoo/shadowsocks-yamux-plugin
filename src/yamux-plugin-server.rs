@@ -8,6 +8,8 @@ use std::{
 use env_logger::Builder;
 use futures::StreamExt;
 use log::{debug, error, info, trace, warn};
+#[cfg(feature = "mimalloc")]
+use mimalloc::MiMalloc;
 use shadowsocks::{
     config::ServerType,
     context::{Context, SharedContext},
@@ -25,6 +27,10 @@ use tokio::{
 use tokio_yamux::{Config, Session, StreamHandle};
 
 use yamux_plugin::PluginOpts;
+
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 enum ConnectionType {
