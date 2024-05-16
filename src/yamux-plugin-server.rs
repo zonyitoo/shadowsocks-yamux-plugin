@@ -7,7 +7,7 @@ use std::{
 
 use env_logger::Builder;
 use futures::StreamExt;
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, warn};
 use shadowsocks::{
     config::ServerType,
     context::{Context, SharedContext},
@@ -157,6 +157,11 @@ async fn handle_udp_connection(
                 }
             }
         }
+    }
+
+    // shutdown() will call StreamHandle::close(), which will send Fin
+    if let Err(err) = yamux_stream.shutdown().await {
+        warn!("UDP tunnel shutdown() with FIN gracefully failed, error: {}", err);
     }
 
     Ok(())

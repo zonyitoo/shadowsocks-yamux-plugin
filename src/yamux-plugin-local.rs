@@ -10,8 +10,8 @@ use std::{
 
 use env_logger::Builder;
 use futures::StreamExt;
-use log::{error, info, trace};
-use lru_time_cache::{Entry, LruCache};
+use log::{error, info, trace, warn};
+use lru_time_cache::LruCache;
 use once_cell::sync::OnceCell;
 use shadowsocks::{
     config::ServerType,
@@ -244,10 +244,23 @@ async fn start_udp(
             })
             .lock()
             .await;
-        let tunnel_entry = tunnel_map.entry(peer_addr);
-        let yamux_stream = match tunnel_entry {
-            Entry::Occupied(occ) => occ.into_mut(),
-            Entry::Vacant(vac) => {
+
+        let (opt_yamux_stream, expired_streams) = tunnel_map.notify_get_mut(&peer_addr);
+
+        // Close expired streams gracefully
+        // Create a new task, don't block the main loop
+        tokio::spawn(async move {
+            for (_, mut stream) in expired_streams {
+                if let Err(err) = stream.handle.shutdown().await {
+                    warn!("UDP tunnel expired. closing with FIN failed with error: {}", err);
+                }
+            }
+        });
+
+        let yamux_stream = match opt_yamux_stream {
+            Some(s) => s,
+            // Create a new YAMUX stream. slow-path
+            None => {
                 let new_stream = get_udp_yamux_stream(context, remote_host, remote_port, plugin_opts).await?;
 
                 let (mut rx, tx) = tokio::io::split(new_stream);
@@ -308,7 +321,10 @@ async fn start_udp(
                     }
                 });
 
-                vac.insert(UnderlyingStream { handle: tx })
+                let new_stream = UnderlyingStream { handle: tx };
+
+                tunnel_map.insert(peer_addr, new_stream);
+                tunnel_map.get_mut(&peer_addr).unwrap()
             }
         };
 
