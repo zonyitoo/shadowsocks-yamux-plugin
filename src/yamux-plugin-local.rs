@@ -255,13 +255,15 @@ async fn start_udp(
 
         // Close expired streams gracefully
         // Create a new task, don't block the main loop
-        tokio::spawn(async move {
-            for (_, mut stream) in expired_streams {
-                if let Err(err) = stream.handle.shutdown().await {
-                    warn!("UDP tunnel expired. closing with FIN failed with error: {}", err);
+        if !expired_streams.is_empty() {
+            tokio::spawn(async move {
+                for (_, mut stream) in expired_streams {
+                    if let Err(err) = stream.handle.shutdown().await {
+                        warn!("UDP tunnel expired. closing with FIN failed with error: {}", err);
+                    }
                 }
-            }
-        });
+            });
+        }
 
         let yamux_stream = match opt_yamux_stream {
             Some(s) => s,
