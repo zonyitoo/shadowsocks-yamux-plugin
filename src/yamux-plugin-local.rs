@@ -89,8 +89,13 @@ async fn get_yamux_stream(
                     trace!("yamux connection stream id exhaused");
                     session_list.with(|list| list.borrow_mut().push_back(control));
                 }
+                Err(Error::SessionShutdown) => {
+                    trace!("yamux connection already shutdown");
+                    continue;
+                }
                 Err(err) => {
                     error!("yamux connection open stream failed, error: {}", err);
+                    continue;
                 }
             }
         }
