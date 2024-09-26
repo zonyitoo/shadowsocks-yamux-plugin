@@ -1,11 +1,10 @@
 use std::{
     env,
-    io::{self, Cursor, ErrorKind},
+    io::{self, Cursor, ErrorKind, IsTerminal},
     sync::Arc,
     time::Duration,
 };
 
-use env_logger::Builder;
 use futures::StreamExt;
 use log::{debug, error, info, trace, warn};
 #[cfg(feature = "mimalloc")]
@@ -19,12 +18,14 @@ use shadowsocks::{
     net::{TcpListener, TcpStream, UdpSocket},
     relay::tcprelay::utils::copy_bidirectional,
 };
+use time::UtcOffset;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream as TokioTcpStream,
-    time::{self, Instant},
+    time::Instant,
 };
 use tokio_yamux::{Config, Session, StreamHandle};
+use tracing_subscriber::{filter::EnvFilter, fmt::time::OffsetTime, FmtSubscriber};
 
 use yamux_plugin::PluginOpts;
 
@@ -90,7 +91,7 @@ async fn handle_udp_connection(
     let mut udp_recv_buffer = [0u8; 65535];
     let mut yamux_recv_buffer = Vec::new();
     let timeout = Duration::from_secs(plugin_opts.udp_timeout.unwrap_or(yamux_plugin::UDP_DEFAULT_TIMEOUT_SEC));
-    let timer = time::sleep(timeout);
+    let timer = tokio::time::sleep(timeout);
     tokio::pin!(timer);
 
     loop {
@@ -213,8 +214,25 @@ async fn handle_tcp_session(
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let mut builder = Builder::from_default_env();
-    builder.format_timestamp_millis().init();
+    let mut builder = FmtSubscriber::builder()
+        .with_timer(match OffsetTime::local_rfc_3339() {
+            Ok(t) => t,
+            Err(..) => {
+                // Reinit with UTC time
+                OffsetTime::new(UtcOffset::UTC, time::format_description::well_known::Rfc3339)
+            }
+        })
+        .compact()
+        .with_env_filter(EnvFilter::from_default_env());
+
+    // NOTE: ansi is enabled by default.
+    // Could be disabled by `NO_COLOR` environment variable.
+    // https://no-color.org/
+    if !std::io::stdout().is_terminal() {
+        builder = builder.with_ansi(false);
+    }
+
+    builder.init();
 
     #[cfg(all(unix, not(target_os = "android")))]
     yamux_plugin::adjust_nofile();
@@ -279,7 +297,7 @@ async fn main() -> io::Result<()> {
                     Ok(s) => s,
                     Err(err) => {
                         error!("TcpListener::accept failed, error: {}", err);
-                        time::sleep(Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                         continue;
                     }
                 };
@@ -308,7 +326,7 @@ async fn main() -> io::Result<()> {
                 Ok(s) => s,
                 Err(err) => {
                     error!("TcpListener::accept failed, error: {}", err);
-                    time::sleep(Duration::from_secs(1)).await;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                     continue;
                 }
             };

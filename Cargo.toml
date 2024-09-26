@@ -23,7 +23,14 @@ tokio = { version = "1.21.2", features = [
     "io-util",
 ] }
 tokio-yamux = "0.3.7"
-env_logger = "0.11"
+tracing-subscriber = { version = "0.3", features = [
+    "std",
+    "fmt",
+    "env-filter",
+    "time",
+    "local-time",
+] }
+time = "0.3"
 futures = "0.3.24"
 log = "0.4.17"
 serde_urlencoded = "0.7"

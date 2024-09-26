@@ -2,13 +2,12 @@ use std::{
     cell::RefCell,
     collections::LinkedList,
     env,
-    io::{self, Cursor, ErrorKind},
+    io::{self, Cursor, ErrorKind, IsTerminal},
     net::SocketAddr,
     sync::Arc,
     time::Duration,
 };
 
-use env_logger::Builder;
 use futures::StreamExt;
 use log::{error, info, trace, warn};
 use lru_time_cache::LruCache;
@@ -24,12 +23,13 @@ use shadowsocks::{
     net::{TcpListener, TcpStream, UdpSocket},
     relay::tcprelay::utils::copy_bidirectional,
 };
+use time::UtcOffset;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, WriteHalf},
     sync::Mutex,
-    time,
 };
 use tokio_yamux::{Config, Control, Error, Session, StreamHandle};
+use tracing_subscriber::{filter::EnvFilter, fmt::time::OffsetTime, FmtSubscriber};
 
 use yamux_plugin::PluginOpts;
 
@@ -192,7 +192,7 @@ async fn start_tcp(
             Ok(s) => s,
             Err(err) => {
                 error!("TcpListener::accept failed, error: {}", err);
-                time::sleep(Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
         };
@@ -243,7 +243,7 @@ async fn start_udp(
             Ok(s) => s,
             Err(err) => {
                 error!("UdpSocket::recv_from failed, error: {}", err);
-                time::sleep(Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
         };
@@ -383,8 +383,26 @@ async fn start_udp(
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let mut builder = Builder::from_default_env();
-    builder.format_timestamp_millis().init();
+    let mut builder = FmtSubscriber::builder()
+        .with_level(true)
+        .with_timer(match OffsetTime::local_rfc_3339() {
+            Ok(t) => t,
+            Err(..) => {
+                // Reinit with UTC time
+                OffsetTime::new(UtcOffset::UTC, time::format_description::well_known::Rfc3339)
+            }
+        })
+        .with_env_filter(EnvFilter::from_default_env())
+        .compact();
+
+    // NOTE: ansi is enabled by default.
+    // Could be disabled by `NO_COLOR` environment variable.
+    // https://no-color.org/
+    if !std::io::stdout().is_terminal() {
+        builder = builder.with_ansi(false);
+    }
+
+    builder.init();
 
     #[cfg(all(unix, not(target_os = "android")))]
     yamux_plugin::adjust_nofile();
