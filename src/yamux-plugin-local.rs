@@ -199,7 +199,16 @@ async fn start_tcp(
 
         trace!("accepted TCP (shadowsocks) client {}", peer_addr);
 
-        let mut yamux_stream = get_tcp_yamux_stream(context, remote_host, remote_port, plugin_opts).await?;
+        let mut yamux_stream = match get_tcp_yamux_stream(context, remote_host, remote_port, plugin_opts).await {
+            Ok(s) => s,
+            Err(err) => {
+                error!(
+                    "failed to get a valid yamux stream to {}:{}, error: {}",
+                    remote_host, remote_port, err
+                );
+                continue;
+            }
+        };
 
         tokio::spawn(async move {
             let _ = copy_bidirectional(&mut stream, &mut yamux_stream).await;
@@ -274,7 +283,16 @@ async fn start_udp(
             Some(s) => s,
             // Create a new YAMUX stream. slow-path
             None => {
-                let new_stream = get_udp_yamux_stream(context, remote_host, remote_port, plugin_opts).await?;
+                let new_stream = match get_udp_yamux_stream(context, remote_host, remote_port, plugin_opts).await {
+                    Ok(s) => s,
+                    Err(err) => {
+                        error!(
+                            "failed to get valid yamux stream to {}:{}, error: {}",
+                            remote_host, remote_port, err
+                        );
+                        continue;
+                    }
+                };
 
                 let (mut rx, tx) = tokio::io::split(new_stream);
 
