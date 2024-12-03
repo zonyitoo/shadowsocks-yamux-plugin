@@ -1,6 +1,9 @@
 //! shadowsocks yamux plugin options
 
-use std::{net::IpAddr, time::Duration};
+use std::{
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_urlencoded::{self, de::Error as DeError, ser::Error as SerError};
@@ -53,7 +56,7 @@ impl PluginOpts {
         }
 
         connect_opts.bind_interface = self.outbound_bind_interface.clone();
-        connect_opts.bind_local_addr = self.outbound_bind_addr;
+        connect_opts.bind_local_addr = self.outbound_bind_addr.map(|ip| SocketAddr::new(ip, 0));
 
         connect_opts.tcp.keepalive = self.tcp_keep_alive.map(|sec| Duration::from_secs(sec));
         connect_opts.tcp.fastopen = self.tcp_fast_open.unwrap_or(false);
