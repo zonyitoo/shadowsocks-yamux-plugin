@@ -27,7 +27,7 @@ use tokio::{
 use tokio_yamux::{Config, Session, StreamHandle};
 use tracing_subscriber::{filter::EnvFilter, fmt::time::OffsetTime, FmtSubscriber};
 
-use yamux_plugin::PluginOpts;
+use shadowsocks_yamux_plugin::PluginOpts;
 
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
@@ -90,7 +90,11 @@ async fn handle_udp_connection(
 
     let mut udp_recv_buffer = [0u8; 65535];
     let mut yamux_recv_buffer = Vec::new();
-    let timeout = Duration::from_secs(plugin_opts.udp_timeout.unwrap_or(yamux_plugin::UDP_DEFAULT_TIMEOUT_SEC));
+    let timeout = Duration::from_secs(
+        plugin_opts
+            .udp_timeout
+            .unwrap_or(shadowsocks_yamux_plugin::UDP_DEFAULT_TIMEOUT_SEC),
+    );
     let timer = tokio::time::sleep(timeout);
     tokio::pin!(timer);
 
@@ -235,7 +239,7 @@ async fn main() -> io::Result<()> {
     builder.init();
 
     #[cfg(all(unix, not(target_os = "android")))]
-    yamux_plugin::adjust_nofile();
+    shadowsocks_yamux_plugin::adjust_nofile();
 
     let remote_host = env::var("SS_REMOTE_HOST").expect("require SS_REMOTE_HOST");
     let remote_port = env::var("SS_REMOTE_PORT").expect("require SS_REMOTE_PORT");
